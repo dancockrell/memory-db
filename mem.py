@@ -477,6 +477,71 @@ def cmd_guard(conn, args) -> int:
     return 1 if (unprotected or thin) else 0
 
 
+
+def classify_location(loc: str):
+    """Decide what a dependency's `location` actually is before judging it.
+
+    Returns (state, detail); state is one of:
+      ok         -- resolves on this machine
+      gone       -- a path shape that does not resolve
+      unchecked  -- not a single filesystem path; cannot be judged from here
+
+    Two bugs shaped this, in order.
+
+    First, `Path(loc).exists()` was called on every row, so a URL, a prose
+    note, a wildcard and a relative path all reported "GONE" identically --
+    six rows, six false positives. A warning list where everything is a
+    false positive teaches the reader to skim it, which is how the one real
+    GONE row gets missed.
+
+    Then the fix over-corrected: a prose heuristic looking for " and "
+    matched a real directory named "Legacy builds and Assets...", quietly
+    demoting a checkable path to unchecked. So the filesystem is asked
+    first and the prose heuristics are only a fallback for strings that
+    have already failed to resolve. Guess last, look first.
+    """
+    loc = (loc or "").strip()
+    if not loc:
+        return "unchecked", "empty"
+
+    if "://" in loc:
+        return "unchecked", "URL, not a path"
+
+    # Wildcards need globbing; Path.exists() compares the literal asterisk.
+    if any(ch in loc for ch in "*?["):
+        pat = Path(loc)
+        try:
+            if pat.parent.is_dir():
+                return ("ok", loc) if any(pat.parent.glob(pat.name))                        else ("gone", f"no match for {loc}")
+        except OSError:
+            return "unchecked", "cannot glob"
+        return "gone", f"containing directory absent: {pat.parent}"
+
+    p = Path(loc)
+    try:
+        if p.exists():
+            return "ok", loc
+    except OSError:
+        return "unchecked", "invalid path syntax"
+
+    # A relative path was written relative to something. Try the obvious
+    # anchors before declaring a live file dead.
+    if not p.is_absolute():
+        for anchor in (Path.home(), Path("C:/")):
+            try:
+                if (anchor / p).exists():
+                    return "ok", str(anchor / p)
+            except OSError:
+                pass
+
+    # Only now, having failed to resolve it, ask whether it was ever a path.
+    if " and " in loc or loc.lower().startswith("hardcoded"):
+        return "unchecked", "prose, or several locations in one field"
+    if not p.is_absolute():
+        return "unchecked", f"relative path, no anchor found: {loc}"
+
+    return "gone", loc
+
 def cmd_review(conn, args) -> int:
     """Maintenance. A memory store that is never pruned becomes untrustworthy."""
     counts = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
@@ -548,14 +613,23 @@ def cmd_review(conn, args) -> int:
     rows = conn.execute(
         "SELECT project,name,location FROM dependencies WHERE location IS NOT NULL"
     ).fetchall()
-    missing = 0
+    missing = unverifiable = 0
     for r in rows:
-        if not Path(r["location"]).exists():
-            print(f"  {r['project']} -> {r['name']}  GONE: {r['location']}")
+        state, detail = classify_location(r["location"])
+        if state == "gone":
+            print(f"  {r['project']} -> {r['name']}  GONE: {detail}")
             missing += 1
             issues += 1
+        elif state == "unchecked":
+            unverifiable += 1
+            print(f"  {r['project']} -> {r['name']}  NOT CHECKED: {detail}")
     if not missing:
-        print("  all present")
+        print("  none confirmed missing")
+    if unverifiable:
+        print("")
+        print(f"    {unverifiable} location(s) above are not filesystem paths.")
+        print("    They were not checked. Absence of a warning is not evidence")
+        print("    they are present -- give those rows a --check command.")
 
     # Generating from a source does not help if nothing re-runs it. A file
     # cannot drift from its row while it is being written, and drifts for as
