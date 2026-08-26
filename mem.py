@@ -146,13 +146,22 @@ def cmd_search(conn, args) -> int:
 
 def cmd_remember(conn, args) -> int:
     existing = conn.execute(
-        "SELECT value FROM facts WHERE category = ? AND key = ?", (args.category, args.key)
+        "SELECT value, check_cmd FROM facts WHERE category = ? AND key = ?",
+        (args.category, args.key),
     ).fetchone()
+    check = getattr(args, "check", None)
+    # COALESCE, not excluded.check_cmd: updating a fact's wording without
+    # passing --check must not silently delete the command that verifies it.
+    # Erasing a check while editing prose is exactly how a row goes back to
+    # being a claim nobody can re-derive.
     conn.execute(
-        "INSERT INTO facts (category,key,value,confidence,source) VALUES (?,?,?,?,?) "
+        "INSERT INTO facts (category,key,value,confidence,source,check_cmd) "
+        "VALUES (?,?,?,?,?,?) "
         "ON CONFLICT(category,key) DO UPDATE SET value=excluded.value, "
-        "confidence=excluded.confidence, source=excluded.source, updated_at=datetime('now')",
-        (args.category, args.key, args.value, args.confidence, args.source),
+        "confidence=excluded.confidence, source=excluded.source, "
+        "check_cmd=COALESCE(excluded.check_cmd, facts.check_cmd), "
+        "updated_at=datetime('now')",
+        (args.category, args.key, args.value, args.confidence, args.source, check),
     )
     conn.commit()
     if existing and existing["value"] != args.value:
@@ -163,6 +172,12 @@ def cmd_remember(conn, args) -> int:
         print(f"  unchanged {args.category}/{args.key}")
     else:
         print(f"  added {args.category}/{args.key}  [{args.confidence}]")
+
+    kept = check or (existing["check_cmd"] if existing else None)
+    if kept:
+        print(f"    verify: {kept}")
+    elif args.category in ("trap", "tool", "reference"):
+        print("    no --check: a reader can only believe this row, not test it")
     return 0
 
 
@@ -715,6 +730,8 @@ def main() -> int:
     s.add_argument("value")
     s.add_argument("--confidence", choices=CONFIDENCE, default="verified")
     s.add_argument("--source")
+    s.add_argument("--check", help="command that establishes this fact, so a "
+                                   "reader can re-derive it instead of believing it")
 
     s = sub.add_parser("forget", help="delete a fact")
     s.add_argument("category", choices=CATEGORIES)

@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence  TEXT DEFAULT 'verified' CHECK (confidence IN
                   ('verified','reported','inferred')),
     source      TEXT,
+    -- The command that establishes this fact. A claim needs the reader to
+    -- trust whoever wrote it; a command tells the truth every time, including
+    -- after the world changes underneath the row.
+    check_cmd   TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (category, key)
