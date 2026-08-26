@@ -333,13 +333,33 @@ def cmd_guard(conn, args) -> int:
         "WHERE location IS NOT NULL GROUP BY location ORDER BY location"
     ).fetchall()
 
-    written = skipped = 0
+    written = 0
+    unprotected: list[tuple[str, str, str]] = []   # (location, projects, reason)
+    thin: list[tuple[str, str, int]] = []          # (project, name, why length)
+
+    # A dependency whose why is a single short sentence produces a warning
+    # nobody stops for. Generating from a database moves the accuracy problem
+    # to the row; it does not remove it. Treat a thin row as a defect.
+    THIN_WHY = 80
+
     for row in rows:
         loc = row["location"]
-        # Skip anything that isn't a real directory on disk: URLs, ports,
-        # bare filenames that name a model rather than a path.
-        if "://" in loc or not Path(loc).is_dir():
-            skipped += 1
+        projects = ", ".join(sorted(set(row["projects"].split("|"))))
+
+        # A URL has no directory to warn in -- expected, but still means this
+        # dependency has no colocated protection.
+        if "://" in loc:
+            unprotected.append((loc, projects, "network endpoint, no directory exists"))
+            continue
+
+        # Anything else that is not a directory is a RECORDING defect, not
+        # housekeeping. A bare filename means guard silently protects nothing.
+        if not Path(loc).is_dir():
+            parent = Path(loc).parent
+            hint = (f"not a directory - did you mean {parent}?"
+                    if str(parent) not in (".", "") and parent.is_dir()
+                    else "not a directory on disk")
+            unprotected.append((loc, projects, hint))
             continue
 
         target = Path(loc)
@@ -376,21 +396,45 @@ def cmd_guard(conn, args) -> int:
             "",
         ]
 
+        for d in deps:
+            if len(d["why"] or "") < THIN_WHY:
+                thin.append((d["project"], d["name"], len(d["why"] or "")))
+
         out = target / "WHAT-USES-THIS.md"
         text = "\n".join(lines)
         try:
             if out.exists() and out.read_text(encoding="utf-8") == text:
-                print(f"  {loc}: unchanged")
+                print(f"  ok       {loc}  (unchanged)")
                 continue
             out.write_text(text, encoding="utf-8", newline="\n")
-            print(f"  {loc}: wrote WHAT-USES-THIS.md  (needed by {', '.join(projects)})")
+            print(f"  wrote    {loc}  (needed by {', '.join(projects)})")
             written += 1
         except OSError as exc:
-            print(f"  {loc}: FAILED - {exc}")
-            skipped += 1
+            unprotected.append((loc, ", ".join(projects), f"write failed: {exc.strerror}"))
 
-    print(f"\n  {written} written, {skipped} skipped (URLs and non-directories)")
-    return 0
+    print(f"\n  {written} written")
+
+    # A silent skip reads as housekeeping. It means a dependency has no
+    # colocated protection at all -- which is how the FLUX licence warning,
+    # the one with an actual legal consequence, ended up existing nowhere.
+    if unprotected:
+        print(f"\n  UNPROTECTED - {len(unprotected)} dependency location(s) have no warning file:")
+        for loc, projects, reason in unprotected:
+            print(f"    {loc}")
+            print(f"      needed by {projects}")
+            print(f"      {reason}")
+        print("\n    Fix by pointing location at the containing directory:")
+        print("      python mem.py dep PROJECT NAME --location <dir> --why \"...\"")
+
+    if thin:
+        print(f"\n  THIN - {len(thin)} row(s) produce a warning too short to stop anyone:")
+        for project, name, n in sorted(set(thin)):
+            print(f"    {project} -> {name}  ({n} chars of 'why')")
+        print("\n    Generating from a database moves the accuracy problem to the row,")
+        print("    it does not remove it. A one-line why is the same defect as an")
+        print("    empty warning, just harder to see.")
+
+    return 1 if (unprotected or thin) else 0
 
 
 def cmd_review(conn, args) -> int:
