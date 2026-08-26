@@ -328,6 +328,22 @@ def cmd_guard(conn, args) -> int:
     occurs, not where the dependency is declared and not where the reader is
     already being careful.
     """
+    # Denominator first. "No problems found" and "nothing was checked" print
+    # identically unless you make them different -- and the second is the more
+    # dangerous state, because it looks like success.
+    total_deps = conn.execute("SELECT count(*) FROM dependencies").fetchone()[0]
+    with_loc = conn.execute(
+        "SELECT count(*) FROM dependencies WHERE location IS NOT NULL"
+    ).fetchone()[0]
+
+    if total_deps == 0:
+        print("  NOTHING TO CHECK - the dependencies table is empty.")
+        print("  This is not a pass. Either nothing has been recorded yet, or the")
+        print("  table was lost. Verify before treating this as clean.")
+        return 1
+
+    print(f"  checking {with_loc} of {total_deps} dependencies (those with a location)\n")
+
     rows = conn.execute(
         "SELECT location, group_concat(project, '|') AS projects FROM dependencies "
         "WHERE location IS NOT NULL GROUP BY location ORDER BY location"
@@ -439,6 +455,16 @@ def cmd_guard(conn, args) -> int:
 
 def cmd_review(conn, args) -> int:
     """Maintenance. A memory store that is never pruned becomes untrustworthy."""
+    counts = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+              for t in ("facts", "events", "projects", "dependencies")}
+
+    if counts["facts"] == 0 and counts["projects"] == 0:
+        print("  NOTHING TO REVIEW - facts and projects are both empty.")
+        print("  Every check below would report clean against an empty store, which")
+        print("  is indistinguishable from a healthy one. Verify the database first.")
+        return 1
+
+    print("  reviewing " + ", ".join(f"{n} {t}" for t, n in counts.items()) + "\n")
     issues = 0
 
     print("=== unverified facts (confirm or downgrade) ===")
