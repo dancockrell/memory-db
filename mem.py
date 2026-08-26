@@ -187,13 +187,25 @@ def cmd_log(conn, args) -> int:
 
 def cmd_dep(conn, args) -> int:
     conn.execute(
-        "INSERT INTO dependencies (project,name,location,source_url,why,critical) "
-        "VALUES (?,?,?,?,?,?) ON CONFLICT(project,name) DO UPDATE SET "
-        "location=excluded.location, source_url=excluded.source_url, why=excluded.why",
-        (args.project, args.name, args.location, args.url, args.why, 0 if args.optional else 1),
+        "INSERT INTO dependencies (project,name,location,source_url,why,critical,check_cmd) "
+        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(project,name) DO UPDATE SET "
+        "location=excluded.location, source_url=excluded.source_url, why=excluded.why, "
+        "check_cmd=coalesce(excluded.check_cmd, dependencies.check_cmd)",
+        (args.project, args.name, args.location, args.url, args.why,
+         0 if args.optional else 1, args.check),
     )
     conn.commit()
     print(f"  {args.project} -> {args.name}  ({args.location or 'no path'})")
+    if not args.check:
+        existing = conn.execute(
+            "SELECT check_cmd FROM dependencies WHERE project=? AND name=?",
+            (args.project, args.name),
+        ).fetchone()
+        if not (existing and existing["check_cmd"]):
+            # A claim about what exists rots the moment the world moves and
+            # looks equally authoritative afterwards. A command does not.
+            print("  NOTE: no --check recorded. A reader cannot verify this row,")
+            print("        only believe it. Add the command that establishes it.")
     return 0
 
 
@@ -297,7 +309,10 @@ def cmd_export(conn, args) -> int:
                     lines.append(f"- Location: `{d['location']}`")
                 if d["source_url"]:
                     lines.append(f"- Source: {d['source_url']}")
-                lines += [f"- Why: {d['why']}", ""]
+                lines.append(f"- Why: {d['why']}")
+                if d["check_cmd"]:
+                    lines.append(f"- Verify: `{d['check_cmd']}`")
+                lines.append("")
         if opt:
             lines += ["## Optional", ""]
             for d in opt:
@@ -403,6 +418,10 @@ def cmd_guard(conn, args) -> int:
             lines.append("")
             lines.append(d["why"])
             lines.append("")
+            # Write the check, not the claim. A statement about what exists
+            # rots silently; a command tells the truth every time it is run.
+            if d["check_cmd"]:
+                lines += ["Verify for yourself:", "", "```", d["check_cmd"], "```", ""]
             if d["source_url"]:
                 lines += [f"Reinstall from: {d['source_url']}", ""]
 
@@ -622,6 +641,7 @@ def main() -> int:
     s.add_argument("--location")
     s.add_argument("--url")
     s.add_argument("--why", required=True)
+    s.add_argument("--check", help="command that VERIFIES this, not the answer it gave once")
     s.add_argument("--optional", action="store_true")
 
     s = sub.add_parser("project", help="show or update a project")
