@@ -236,6 +236,88 @@ def cmd_project(conn, args) -> int:
     return 0
 
 
+def cmd_export(conn, args) -> int:
+    """Write DEPENDENCIES.md into each project directory.
+
+    A database only defends a session that thinks to query it. A file in the
+    directory reaches whoever is standing there deciding what to delete --
+    which is the person who actually causes the damage. Generated from the
+    database so the two cannot drift.
+    """
+    rows = conn.execute(
+        "SELECT p.name, p.path, p.repo FROM projects p "
+        "WHERE EXISTS (SELECT 1 FROM dependencies d WHERE d.project = p.name)"
+        + (" AND p.name = ?" if args.project else "")
+        + " ORDER BY p.name",
+        (args.project,) if args.project else (),
+    ).fetchall()
+
+    if not rows:
+        print("  no projects with recorded dependencies" +
+              (f" matching '{args.project}'" if args.project else ""))
+        return 1
+
+    written = skipped = 0
+    for proj in rows:
+        if not proj["path"]:
+            print(f"  {proj['name']}: no path recorded, skipped")
+            skipped += 1
+            continue
+        target = Path(proj["path"])
+        if not target.exists():
+            print(f"  {proj['name']}: path missing on disk, skipped ({target})")
+            skipped += 1
+            continue
+
+        deps = conn.execute(
+            "SELECT name, location, source_url, why, critical FROM dependencies "
+            "WHERE project = ? ORDER BY critical DESC, name", (proj["name"],)
+        ).fetchall()
+
+        lines = [
+            f"# {proj['name']} — external dependencies",
+            "",
+            "**None of this is declared in `package.json`, `Cargo.toml`, or any",
+            "other manifest in this repository.** If you are cleaning up this",
+            "machine, these look like unrelated clutter and are not.",
+            "",
+            "Generated from the shared memory database. Edit there, not here:",
+            "`python C:\\Users\\Admin\\dev\\memory-db\\mem.py dep " + proj["name"] + " NAME --why \"...\"`",
+            "",
+        ]
+        crit = [d for d in deps if d["critical"]]
+        opt = [d for d in deps if not d["critical"]]
+
+        if crit:
+            lines += ["## Required", ""]
+            for d in crit:
+                lines.append(f"### {d['name']}")
+                lines.append("")
+                if d["location"]:
+                    lines.append(f"- Location: `{d['location']}`")
+                if d["source_url"]:
+                    lines.append(f"- Source: {d['source_url']}")
+                lines += [f"- Why: {d['why']}", ""]
+        if opt:
+            lines += ["## Optional", ""]
+            for d in opt:
+                loc = f" (`{d['location']}`)" if d["location"] else ""
+                lines.append(f"- **{d['name']}**{loc} — {d['why']}")
+            lines.append("")
+
+        out = target / "DEPENDENCIES.md"
+        text = "\n".join(lines)
+        if out.exists() and out.read_text(encoding="utf-8") == text:
+            print(f"  {proj['name']}: unchanged")
+            continue
+        out.write_text(text, encoding="utf-8", newline="\n")
+        print(f"  {proj['name']}: wrote {out}  ({len(crit)} required, {len(opt)} optional)")
+        written += 1
+
+    print(f"\n  {written} written, {skipped} skipped")
+    return 0
+
+
 def cmd_review(conn, args) -> int:
     """Maintenance. A memory store that is never pruned becomes untrustworthy."""
     issues = 0
@@ -353,6 +435,9 @@ def main() -> int:
     s.add_argument("--stack")
     s.add_argument("--status", choices=("active", "paused", "archived", "published"))
     s.add_argument("--notes")
+
+    s = sub.add_parser("export", help="write DEPENDENCIES.md into project directories")
+    s.add_argument("project", nargs="?", help="one project, or omit for all")
 
     sub.add_parser("review", help="maintenance report")
 
