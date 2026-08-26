@@ -318,6 +318,81 @@ def cmd_export(conn, args) -> int:
     return 0
 
 
+def cmd_guard(conn, args) -> int:
+    """Write WHAT-USES-THIS.md into each dependency's own directory.
+
+    `export` puts the list in the project, which reaches someone reading the
+    project. It does not reach someone standing in C:\\Ruby4Lich5 deciding
+    whether that folder is game clutter -- which is where the deletion
+    actually happened. The warning belongs where the destructive action
+    occurs, not where the dependency is declared and not where the reader is
+    already being careful.
+    """
+    rows = conn.execute(
+        "SELECT location, group_concat(project, '|') AS projects FROM dependencies "
+        "WHERE location IS NOT NULL GROUP BY location ORDER BY location"
+    ).fetchall()
+
+    written = skipped = 0
+    for row in rows:
+        loc = row["location"]
+        # Skip anything that isn't a real directory on disk: URLs, ports,
+        # bare filenames that name a model rather than a path.
+        if "://" in loc or not Path(loc).is_dir():
+            skipped += 1
+            continue
+
+        target = Path(loc)
+        projects = sorted(set(row["projects"].split("|")))
+        deps = conn.execute(
+            "SELECT project, name, why, critical, source_url FROM dependencies "
+            "WHERE location = ? ORDER BY critical DESC, project", (loc,)
+        ).fetchall()
+
+        lines = [
+            "# Do not delete this directory",
+            "",
+            f"`{loc}` is a dependency of "
+            + ", ".join(f"**{p}**" for p in projects) + ".",
+            "",
+            "It looks like unrelated software from outside. It is not.",
+            "",
+        ]
+        for d in deps:
+            lines.append(f"## {d['project']} needs it")
+            lines.append("")
+            lines.append(d["why"])
+            lines.append("")
+            if d["source_url"]:
+                lines += [f"Reinstall from: {d['source_url']}", ""]
+
+        lines += [
+            "---",
+            "",
+            "Generated from the shared memory database at",
+            "`C:\\Users\\Admin\\dev\\memory-db`. To change what this says, edit there",
+            "and re-run `python mem.py guard` -- editing this file directly will be",
+            "overwritten.",
+            "",
+        ]
+
+        out = target / "WHAT-USES-THIS.md"
+        text = "\n".join(lines)
+        try:
+            if out.exists() and out.read_text(encoding="utf-8") == text:
+                print(f"  {loc}: unchanged")
+                continue
+            out.write_text(text, encoding="utf-8", newline="\n")
+            print(f"  {loc}: wrote WHAT-USES-THIS.md  (needed by {', '.join(projects)})")
+            written += 1
+        except OSError as exc:
+            print(f"  {loc}: FAILED - {exc}")
+            skipped += 1
+
+    print(f"\n  {written} written, {skipped} skipped (URLs and non-directories)")
+    return 0
+
+
 def cmd_review(conn, args) -> int:
     """Maintenance. A memory store that is never pruned becomes untrustworthy."""
     issues = 0
@@ -438,6 +513,8 @@ def main() -> int:
 
     s = sub.add_parser("export", help="write DEPENDENCIES.md into project directories")
     s.add_argument("project", nargs="?", help="one project, or omit for all")
+
+    sub.add_parser("guard", help="write WHAT-USES-THIS.md into dependency directories")
 
     sub.add_parser("review", help="maintenance report")
 
