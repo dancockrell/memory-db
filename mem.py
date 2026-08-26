@@ -516,6 +516,52 @@ def cmd_review(conn, args) -> int:
     if not missing:
         print("  all present")
 
+    # Generating from a source does not help if nothing re-runs it. A file
+    # cannot drift from its row while it is being written, and drifts for as
+    # long as it is not. Caught after a generated DEPENDENCIES.md landed in
+    # another repo carrying a claim the database had already corrected.
+    print("\n=== generated files older than the rows they came from ===")
+    import datetime as _dt
+
+    stale = 0
+    for proj in conn.execute(
+        "SELECT p.name, p.path, max(d.updated_at) AS newest FROM projects p "
+        "JOIN dependencies d ON d.project = p.name "
+        "WHERE p.path IS NOT NULL GROUP BY p.name"
+    ):
+        f = Path(proj["path"]) / "DEPENDENCIES.md"
+        if not f.exists() or not proj["newest"]:
+            continue
+        row_time = _dt.datetime.fromisoformat(proj["newest"]).replace(tzinfo=_dt.timezone.utc)
+        file_time = _dt.datetime.fromtimestamp(f.stat().st_mtime, _dt.timezone.utc)
+        if file_time < row_time:
+            print(f"  {proj['name']}: DEPENDENCIES.md is older than its rows")
+            print(f"      file {file_time:%Y-%m-%d %H:%M}  rows {row_time:%Y-%m-%d %H:%M}")
+            stale += 1
+            issues += 1
+
+    for dep in conn.execute(
+        "SELECT location, max(updated_at) AS newest FROM dependencies "
+        "WHERE location IS NOT NULL GROUP BY location"
+    ):
+        loc = dep["location"]
+        if "://" in loc or not Path(loc).is_dir():
+            continue
+        f = Path(loc) / "WHAT-USES-THIS.md"
+        if not f.exists() or not dep["newest"]:
+            continue
+        row_time = _dt.datetime.fromisoformat(dep["newest"]).replace(tzinfo=_dt.timezone.utc)
+        file_time = _dt.datetime.fromtimestamp(f.stat().st_mtime, _dt.timezone.utc)
+        if file_time < row_time:
+            print(f"  {loc}: WHAT-USES-THIS.md is older than its rows")
+            stale += 1
+            issues += 1
+
+    if not stale:
+        print("  all current")
+    else:
+        print("\n    Fix: python mem.py export && python mem.py guard")
+
     print("\n=== projects whose path is missing on disk ===")
     rows = conn.execute("SELECT name, path FROM projects WHERE path IS NOT NULL").fetchall()
     gone = 0
