@@ -308,7 +308,11 @@ def cmd_export(conn, args) -> int:
         out = target / "DEPENDENCIES.md"
         text = "\n".join(lines)
         if out.exists() and out.read_text(encoding="utf-8") == text:
-            print(f"  {proj['name']}: unchanged")
+            # Content is current; only the timestamp lies. Touch it so the
+            # staleness check in `review` can actually be cleared -- a check
+            # that stays lit after the fix is as useless as one that never fires.
+            out.touch()
+            print(f"  {proj['name']}: unchanged (timestamp refreshed)")
             continue
         out.write_text(text, encoding="utf-8", newline="\n")
         print(f"  {proj['name']}: wrote {out}  ({len(crit)} required, {len(opt)} optional)")
@@ -420,7 +424,8 @@ def cmd_guard(conn, args) -> int:
         text = "\n".join(lines)
         try:
             if out.exists() and out.read_text(encoding="utf-8") == text:
-                print(f"  ok       {loc}  (unchanged)")
+                out.touch()
+                print(f"  ok       {loc}  (unchanged, timestamp refreshed)")
                 continue
             out.write_text(text, encoding="utf-8", newline="\n")
             print(f"  wrote    {loc}  (needed by {', '.join(projects)})")
