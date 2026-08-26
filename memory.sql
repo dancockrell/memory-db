@@ -21,6 +21,7 @@ CREATE TABLE events (
     summary     TEXT NOT NULL,
     detail      TEXT
 );
+INSERT INTO "events" VALUES(1,'2026-08-26 15:32:10','a9593032','milestone','Structured memory database created and hourly backup registered','SQLite 3.50.4 via Python. Dump-and-hash backup to private repo dancockrell/memory-db. Scheduled task ClaudeMemoryBackup, hourly.');
 CREATE TABLE facts (
     id          INTEGER PRIMARY KEY,
     category    TEXT NOT NULL CHECK (category IN
