@@ -527,6 +527,23 @@ def cmd_review(conn, args) -> int:
     if not dupes:
         print("  none")
 
+    # Write the check, not the claim. A row with no verification command can
+    # only be believed, never re-derived, and it stays authoritative long
+    # after it stops being true.
+    print("\n=== dependencies with no verification command ===")
+    rows = conn.execute(
+        "SELECT project, name FROM dependencies "
+        "WHERE check_cmd IS NULL OR check_cmd = '' ORDER BY project, name"
+    ).fetchall()
+    for r in rows:
+        print(f"  {r['project']} -> {r['name']}")
+        issues += 1
+    if not rows:
+        print("  all verifiable")
+    else:
+        print('\n    A reader can only believe these. Add the command that')
+        print('    establishes it:  mem dep PROJECT NAME --check "..."')
+
     print("\n=== dependencies whose location is missing on disk ===")
     rows = conn.execute(
         "SELECT project,name,location FROM dependencies WHERE location IS NOT NULL"
