@@ -105,12 +105,97 @@ def scenario(tmp, label, hold_seconds, timeout):
             "ok": result.value == 1, "present": present, "elapsed": elapsed}
 
 
+def writes_set_matches_reality() -> bool:
+    """Does mem.py's WRITES set still name every command that writes?
+
+    lost_write() only fires for commands listed in WRITES. A command that
+    writes but is missing from that set has its lost write downgraded to
+    "read failed" and exit 1 -- quiet, and quiet is the whole thing this
+    machinery exists to prevent.
+
+    The Red Team session verified the set by hand once. A hand check is a
+    claim about one moment; this derives the answer from the source every
+    run, so adding a writing command and forgetting the set fails here
+    instead of silently years later.
+    """
+    import ast
+    import re
+
+    src = (HERE / "mem.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    # Look at what is PASSED TO execute(), not at the function's text.
+    #
+    # The first version grepped each function body for INSERT/UPDATE/DELETE
+    # and flagged cmd_export and cmd_guard, which touch no table at all. It
+    # had matched the English word "delete" -- once in a docstring about
+    # "deciding what to delete", once in the literal "# Do not delete this
+    # directory" that cmd_guard writes into its warning files.
+    #
+    # Grepping text and parsing structure are different claims, and prose
+    # about deleting reads identically to SQL that deletes. Walking the call
+    # arguments cannot make that mistake, because a docstring is not an
+    # argument to execute().
+    SQL_WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE)\b", re.I)
+
+    def issues_a_write(fn) -> bool:
+        for call in ast.walk(fn):
+            if not isinstance(call, ast.Call):
+                continue
+            fname = getattr(call.func, "attr", None)
+            if fname not in ("execute", "executemany", "executescript"):
+                continue
+            for arg in call.args[:1]:
+                # Constant strings, and adjacent-literal concatenations.
+                parts = []
+                for n in ast.walk(arg):
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                        parts.append(n.value)
+                if any(SQL_WRITE.match(p) for p in parts):
+                    return True
+        return False
+
+    actually_write = {
+        node.name[4:]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name.startswith("cmd_")
+        and issues_a_write(node)
+    }
+
+    m = re.search(r"WRITES\s*=\s*\{([^}]*)\}", src)
+    if not m:
+        print("  WRITES set not found in mem.py -- this check is broken")
+        return False
+    declared = {s.strip().strip("\"'") for s in m.group(1).split(",") if s.strip()}
+
+    if not actually_write:
+        print("  no writing commands detected -- the AST walk is broken, not mem.py")
+        return False
+
+    missing = actually_write - declared
+    extra = declared - actually_write
+    print(f"  commands that write: {' '.join(sorted(actually_write))}")
+    print(f"  WRITES declares:     {' '.join(sorted(declared))}")
+    if missing:
+        print(f"  MISSING from WRITES: {' '.join(sorted(missing))}")
+        print("  -> a lost write in these would be reported as a mere read failure")
+    if extra:
+        print(f"  EXTRA in WRITES:     {' '.join(sorted(extra))}")
+    return not missing and not extra
+
+
 def main() -> int:
     if not SCHEMA.exists():
         print("!! schema.sql missing -- cannot build a fixture")
         return 2
 
     failures = 0
+
+    print("  --- does WRITES still match the code? (static, fast) ---")
+    if not writes_set_matches_reality():
+        failures += 1
+    print()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
 

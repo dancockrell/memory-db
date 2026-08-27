@@ -42,6 +42,17 @@ CONFIDENCE = ("verified", "reported", "inferred")
 # condition that makes that rule necessary. A >5s write is not exotic here:
 # `mem guard` and `mem export` write files inside a transaction, and the GPU
 # has sat at 100% all day.
+#
+# 30s IS A POLICY, NOT A GUARANTEE, AND THE NUMBER IS NOT THE LOAD-BEARING
+# PART. A hold longer than this still loses the write -- verified, a 35s hold
+# does. What makes that acceptable is that exceeding it is LOUD: lost_write()
+# below prints an unmissable block and exits 3.
+#
+# So if you are tuning this, raise the number if you like, but do not touch
+# the loudness. A silent 300s timeout is worse than a loud 30s one: the
+# failure it hides is a fact that was never recorded, which looks exactly
+# like one that was. Trading the alarm for a bigger number converts a visible
+# failure into an invisible one.
 BUSY_TIMEOUT = 30.0
 
 
