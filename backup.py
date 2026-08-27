@@ -61,11 +61,42 @@ def main() -> int:
         log(f"unchanged ({digest[:12]}) - nothing to do")
         return 0
 
+    rows = sum(1 for line in sql.splitlines() if line.startswith("INSERT"))
+
+    # Count the fragile thing before overwriting the only other copy.
+    # The hash check answers "did anything change", which a wiped database
+    # satisfies enthusiastically. Nothing here refused a collapse: the store
+    # could lose most of its rows and this would dutifully snapshot the loss
+    # and push it. Git history would still hold the good version, so the data
+    # is recoverable -- but nobody would know to go looking, which is the part
+    # that matters.
+    #
+    # Deletions are legitimate (mem forget, consolidating near-duplicates), so
+    # this is not a no-drop rule. It refuses a collapse, not a trim.
+    previous_rows = 0
+    if DUMP.exists():
+        previous_rows = sum(
+            1 for line in DUMP.read_text(encoding="utf-8").splitlines()
+            if line.startswith("INSERT")
+        )
+
+    delta = rows - previous_rows
+    log(f"changed -> {digest[:12]}  ({rows} rows, {delta:+d}, {len(sql):,} bytes)")
+
+    forced = "--force" in sys.argv
+    if forced and previous_rows >= 20 and rows < previous_rows // 2:
+        log(f"--force: accepting a collapse {previous_rows} -> {rows}")
+
+    if not forced and previous_rows >= 20 and rows < previous_rows // 2:
+        log(f"REFUSING: row count collapsed {previous_rows} -> {rows}")
+        log("  Nothing has been written. If this shrink is real, run:")
+        log("    python backup.py --force")
+        log("  Otherwise the live database may be damaged; the last good")
+        log("  snapshot is still in memory.sql and in git history.")
+        return 1
+
     DUMP.write_text(sql, encoding="utf-8", newline="\n")
     HASHFILE.write_text(digest + "\n", encoding="utf-8", newline="\n")
-
-    rows = sum(1 for line in sql.splitlines() if line.startswith("INSERT"))
-    log(f"changed -> {digest[:12]}  ({rows} rows, {len(sql):,} bytes)")
 
     git("add", "memory.sql", "memory.sha256")
 
