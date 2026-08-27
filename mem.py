@@ -150,6 +150,12 @@ def cmd_remember(conn, args) -> int:
         (args.category, args.key),
     ).fetchone()
     check = getattr(args, "check", None)
+    # COALESCE below protects a check from being erased by an unrelated edit,
+    # which left no way to remove a WRONG one -- three rows held prose that a
+    # runner then tried to execute as a command. --clear-check is the explicit
+    # escape hatch; the sentinel survives COALESCE and is normalised to NULL.
+    if getattr(args, "clear_check", False):
+        check = ""
     # COALESCE, not excluded.check_cmd: updating a fact's wording without
     # passing --check must not silently delete the command that verifies it.
     # Erasing a check while editing prose is exactly how a row goes back to
@@ -159,7 +165,8 @@ def cmd_remember(conn, args) -> int:
         "VALUES (?,?,?,?,?,?) "
         "ON CONFLICT(category,key) DO UPDATE SET value=excluded.value, "
         "confidence=excluded.confidence, source=excluded.source, "
-        "check_cmd=COALESCE(excluded.check_cmd, facts.check_cmd), "
+        "check_cmd=CASE WHEN excluded.check_cmd = '' THEN NULL "
+        "ELSE COALESCE(excluded.check_cmd, facts.check_cmd) END, "
         "updated_at=datetime('now')",
         (args.category, args.key, args.value, args.confidence, args.source, check),
     )
@@ -172,6 +179,13 @@ def cmd_remember(conn, args) -> int:
         print(f"  unchanged {args.category}/{args.key}")
     else:
         print(f"  added {args.category}/{args.key}  [{args.confidence}]")
+
+    if getattr(args, "clear_check", False):
+        # Report the erasure, not the value that was erased. `check or
+        # existing` printed the OLD command here, so a successful clear
+        # announced the thing it had just removed.
+        print("    check command CLEARED")
+        return 0
 
     kept = check or (existing["check_cmd"] if existing else None)
     if kept:
@@ -297,7 +311,7 @@ def cmd_export(conn, args) -> int:
             continue
 
         deps = conn.execute(
-            "SELECT name, location, source_url, why, critical FROM dependencies "
+            "SELECT name, location, source_url, why, critical, check_cmd FROM dependencies "
             "WHERE project = ? ORDER BY critical DESC, name", (proj["name"],)
         ).fetchall()
 
@@ -415,7 +429,7 @@ def cmd_guard(conn, args) -> int:
         target = Path(loc)
         projects = sorted(set(row["projects"].split("|")))
         deps = conn.execute(
-            "SELECT project, name, why, critical, source_url FROM dependencies "
+            "SELECT project, name, why, critical, source_url, check_cmd FROM dependencies "
             "WHERE location = ? ORDER BY critical DESC, project", (loc,)
         ).fetchall()
 
@@ -732,6 +746,8 @@ def main() -> int:
     s.add_argument("--source")
     s.add_argument("--check", help="command that establishes this fact, so a "
                                    "reader can re-derive it instead of believing it")
+    s.add_argument("--clear-check", action="store_true",
+                   help="remove a wrong check command (COALESCE otherwise keeps it)")
 
     s = sub.add_parser("forget", help="delete a fact")
     s.add_argument("category", choices=CATEGORIES)
