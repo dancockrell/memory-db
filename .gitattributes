@@ -1,0 +1,21 @@
+# Store and restore bytes exactly.
+#
+# core.autocrlf is true globally on this machine, so a checked-out file can
+# come back with different bytes than went in. Next door in claude-config
+# that silently rewrote 32 of 33 restored files, and the one file anybody
+# thought to spot-check was the only one incapable of revealing it.
+#
+# memory.sql is the entire backup. A fact value containing a newline is
+# perfectly legal and several will exist eventually, and an embedded newline
+# rewritten on checkout is silent corruption of the store's contents rather
+# than a cosmetic diff.
+#
+# Tested here before adding this: a multi-line value survived a real
+# clone-and-restore. It survived for reasons the test could not fully
+# explain -- statement separators came back CRLF while the newline inside
+# the quoted string stayed LF. Depending on a mechanism nobody can account
+# for is how the sibling repo got bitten, so this removes the question
+# instead of trusting the observation.
+#
+# Verify with:  python test_roundtrip.py
+* -text
