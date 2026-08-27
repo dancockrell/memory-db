@@ -46,7 +46,27 @@ def dump_database() -> str:
         log(f"no database at {DB}")
         sys.exit(1)
 
-    # immutable=1 so a WAL-mode write in progress can't block or tear the read
+    # mode=ro, and DO NOT ADD immutable=1.
+    #
+    # The comment here used to claim immutable=1 was what stopped a concurrent
+    # WAL write from tearing the read. It says the opposite of the truth, and
+    # the code never had the flag. immutable=1 promises SQLite the file cannot
+    # change, so it SKIPS THE WAL -- every committed-but-uncheckpointed row is
+    # silently absent from the dump, and the hash gate would cheerfully commit
+    # the smaller file. Measured on a WAL database with two committed rows:
+    #
+    #     mode=ro      sees 2 rows
+    #     immutable=1  sees 1 row
+    #
+    # So the flag would cause precisely the data loss the old comment claimed
+    # it prevented, and anyone "fixing" the mismatch between comment and code
+    # by adding it would be walking into that.
+    #
+    # What actually makes this safe is WAL snapshot isolation, which needs no
+    # flag: a reader sees a consistent snapshot as of when it started and does
+    # not block writers. Verified by dumping against a transaction holding 200
+    # uncommitted rows -- the dump returned the pre-transaction state in 0.01s
+    # rather than a mix, and 201 rows after the commit.
     uri = f"file:{DB.as_posix()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as conn:
         return "\n".join(conn.iterdump())

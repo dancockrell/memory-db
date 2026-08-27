@@ -31,14 +31,48 @@ KINDS = ("decision", "error", "milestone", "removal", "install")
 CONFIDENCE = ("verified", "reported", "inferred")
 
 
+# Six sessions write to this file with no coordination. Python's default is
+# 5.0s, and a hold longer than that raises OperationalError and DROPS the
+# write. Measured: an 8s hold against the 5s default lost the row after 5.6s;
+# the same hold with 30s wrote it at 8.1s, and a 2s control wrote it either
+# way, so the failure was real and not the harness.
+#
+# This is the mechanism CLAUDE.md's "write immediately, a fact learned and not
+# written is a fact lost" depends on, and it was failing under exactly the
+# condition that makes that rule necessary. A >5s write is not exotic here:
+# `mem guard` and `mem export` write files inside a transaction, and the GPU
+# has sat at 100% all day.
+BUSY_TIMEOUT = 30.0
+
+
 def connect() -> sqlite3.Connection:
     if not DB.exists():
         sys.exit(f"no database at {DB} - run: python -c \"import sqlite3,pathlib; "
                  f"sqlite3.connect('memory.db').executescript(pathlib.Path('schema.sql').read_text())\"")
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=BUSY_TIMEOUT)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT * 1000)}")
     return conn
+
+
+def lost_write(exc: Exception, what: str) -> int:
+    """Report a dropped write so loudly it cannot be skimmed past.
+
+    A raw traceback is loud enough for someone watching, and invisible to a
+    session that ran `mem remember` as step four of a nine-step turn. The
+    failure mode that matters is not the crash: it is that a fact which was
+    never recorded looks exactly like one that was.
+    """
+    bar = "!" * 68
+    print(f"\n{bar}", file=sys.stderr)
+    print("  THE WRITE DID NOT HAPPEN. NOTHING WAS SAVED.", file=sys.stderr)
+    print(f"  {what}", file=sys.stderr)
+    print(f"  reason: {exc}", file=sys.stderr)
+    print(f"  waited {BUSY_TIMEOUT:.0f}s for another session to release the store.", file=sys.stderr)
+    print("  RUN THE COMMAND AGAIN. Do not treat this turn as recorded.", file=sys.stderr)
+    print(f"{bar}\n", file=sys.stderr)
+    return 3
 
 
 def wrap(text: str, width: int = 76, indent: str = "      ") -> str:
@@ -784,9 +818,21 @@ def main() -> int:
     sub.add_parser("review", help="maintenance report")
 
     args = p.parse_args()
-    conn = connect()
+    WRITES = {"remember", "forget", "log", "dep", "project"}
+    try:
+        conn = connect()
+    except sqlite3.OperationalError as e:
+        return lost_write(e, f"mem {args.cmd}: could not even open the store")
+
     try:
         return globals()[f"cmd_{args.cmd}"](conn, args)
+    except sqlite3.OperationalError as e:
+        # Only a write can lose data. A blocked read is an inconvenience.
+        if args.cmd in WRITES:
+            detail = " ".join(str(getattr(args, f, "")) for f in ("category", "key", "kind", "summary", "name") if getattr(args, f, None))
+            return lost_write(e, f"mem {args.cmd} {detail}".strip())
+        print(f"  read failed: {e}", file=sys.stderr)
+        return 1
     finally:
         conn.close()
 
