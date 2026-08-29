@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS dependencies (
     source_url  TEXT,
     why         TEXT NOT NULL,
     critical    INTEGER NOT NULL DEFAULT 1,
+    -- The command that establishes this dependency, same rationale as
+    -- facts.check_cmd. mem.py's `dep --check`, `guard`, and `review` all
+    -- read and write this column.
+    check_cmd   TEXT,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (project, name),
     FOREIGN KEY (project) REFERENCES projects(name) ON DELETE CASCADE
 );
@@ -79,4 +84,10 @@ CREATE TRIGGER IF NOT EXISTS projects_touch
 AFTER UPDATE ON projects FOR EACH ROW
 BEGIN
     UPDATE projects SET updated_at = datetime('now') WHERE name = OLD.name;
+END;
+
+CREATE TRIGGER IF NOT EXISTS dependencies_touch
+AFTER UPDATE ON dependencies FOR EACH ROW
+BEGIN
+    UPDATE dependencies SET updated_at = datetime('now') WHERE id = OLD.id;
 END;
